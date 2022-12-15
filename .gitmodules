@@ -1,0 +1,3 @@
+[submodule "network-connector"]
+	path = network-connector
+	url = https://github.com/waifu-diffusion/network-connector.git
