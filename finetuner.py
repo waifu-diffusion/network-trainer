@@ -119,28 +119,8 @@ parser.add_argument(
 parser.add_argument(
     "--save_steps",
     type=int,
-    default=500,
+    default=1000,
     help="Number of steps to save checkpoints at.",
-)
-parser.add_argument(
-    "--resize",
-    dest="resize",
-    type=bool_t,
-    default="True",
-    help="This flag will enable image resizing during training.",
-)
-parser.add_argument(
-    "--center_crop",
-    dest="center_crop",
-    type=bool_t,
-    default="True",
-    help="This flag will enable center cropping during training.",
-)
-parser.add_argument(
-    "--resize_interp",
-    type=str,
-    default="lanczos",
-    help="Image sampling method to use when resizing images",
 )
 parser.add_argument(
     "--shuffle",
@@ -172,13 +152,13 @@ parser.add_argument(
 parser.add_argument(
     "--image_log_steps",
     type=int,
-    default=10,
+    default=200,
     help="Number of steps to log images at.",
 )
 parser.add_argument(
     "--image_log_amount",
     type=int,
-    default=4,
+    default=5,
     help="Number of images to log every image_log_steps",
 )
 parser.add_argument('--use_xformers', type=bool_t, default='False', help='Use memory efficient attention')
@@ -406,7 +386,8 @@ class StableDiffusionTrainer:
             #latents = latents * L_SCALE_FACTOR
             #batch["latents"]
 
-            latents = torch.stack(list(map(lambda x: torch.load(x), batch["latents"]))).to(self.weight_dtype)
+            latents = torch.stack(list(map(lambda x: torch.load(x), batch["latents"]))).to(
+                self.accelerator.device, dtype=self.weight_dtype)
 
             # Sample noise
             noise = torch.randn_like(latents)
@@ -455,9 +436,7 @@ class StableDiffusionTrainer:
                 noise_pred.float(), target.float(), reduction="mean"
             )
 
-            avg_loss = self.accelerator.gather(
-                loss.repeat(args.batch_size)
-            ).mean()
+            avg_loss = self.accelerator.gather_for_metrics(loss).mean()
             train_loss += (
                 avg_loss.item() / 1
             )  # div by gradient accumulation steps
@@ -513,7 +492,7 @@ class StableDiffusionTrainer:
                         self.report_idx = 1
                     else:
                         self.report_idx += 1
-                    if self.report_idx % 10 == 0:
+                    if self.report_idx % 100 == 0:
                         print(f"\nLOSS: {logs['train/loss']} {get_gpu_ram()}", file=sys.stderr)
                         sys.stderr.flush()
 
@@ -551,6 +530,7 @@ def main() -> None:
     accelerator = accelerate.Accelerator(
         gradient_accumulation_steps=1,
         mixed_precision="fp16" if args.fp16 else "no",
+        even_batches=False
     )
 
     # Set seed
@@ -629,9 +609,13 @@ def main() -> None:
         bucket: AspectBucket = pickle.load(f)
 
     dataset = AspectDataset(bucket)
-    sampler = AspectBucketSampler(bucket=bucket)
-    print(f"Loaded {len(dataset)} images from bucket.")
-    print(f"Total of {len(sampler)} batches found.")
+    sampler = AspectBucketSampler(bucket=bucket, dataset=dataset)
+
+    if accelerator.is_main_process:
+        print(f"Loaded {len(dataset)} images from bucket.")
+        print(f"Total of {len(sampler)} batches found.")
+        args.batch_size = bucket.batch_size
+        print(f"BATCH SIZE: {args.batch_size}")
 
     # prefetch_factor is 2 by default ->
     # 2 * num_workers batches will prefetch
