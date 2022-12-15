@@ -1,0 +1,16 @@
+pymongo==4.3.3
+python-dotenv==0.21.0
+scipy==1.9.3
+numpy==1.23.5
+Pillow==9.3.0
+tqdm==4.64.1
+torch==1.13.0
+torchaudio==0.13.0
+torchvision==0.14.0
+accelerate==0.15.0
+diffusers==0.10.2
+transformers==4.25.1
+pynvml==11.4.1
+wandb==0.13.7
+bitsandbytes==0.35.4
+triton==2.0.0.dev20221202

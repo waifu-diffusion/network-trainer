@@ -1,0 +1,16 @@
+{
+    "cSpell.words": [
+        "autocast",
+        "checkpointing",
+        "dotenv",
+        "gridfs",
+        "interp",
+        "pymongo",
+        "scipy",
+        "timestep",
+        "timesteps",
+        "tqdm",
+        "Waifu",
+        "xformers"
+    ]
+}
