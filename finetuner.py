@@ -3,11 +3,8 @@ import argparse
 import socket
 import time
 import torch
-import torchvision
 import transformers
 import diffusers
-import PIL
-import glob
 import random
 import tqdm
 import resource
@@ -36,7 +33,6 @@ from diffusers import (
 from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 from diffusers.optimization import get_scheduler
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
-from PIL import Image, ImageOps
 
 # Latent Scale Factor - https://github.com/huggingface/diffusers/issues/437
 L_SCALE_FACTOR = 0.18215
@@ -66,7 +62,7 @@ parser.add_argument(
     required=True,
     help="The path to the pickled data file to use for finetuning.",
 )
-parser.add_argument("--lr", type=float, default=5e-6, help="Learning rate")
+parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
 parser.add_argument(
     "--epochs", type=int, default=10, help="Number of epochs to train for"
 )
@@ -108,7 +104,7 @@ parser.add_argument(
     "--seed",
     type=int,
     default=42,
-    help="Seed for random number generator, this is to be used for reproduceability purposes.",
+    help="Seed for random number generator, this is to be used for reproducibility purposes.",
 )
 parser.add_argument(
     "--output_path",
@@ -161,6 +157,13 @@ parser.add_argument(
     default=5,
     help="Number of images to log every image_log_steps",
 )
+parser.add_argument(
+    "--vae",
+    type=str,
+    default=None,
+    required=False,
+    help="A path to a vae to use.",
+)
 parser.add_argument('--use_xformers', type=bool_t, default='False', help='Use memory efficient attention')
 args = parser.parse_args()
 
@@ -174,8 +177,8 @@ def get_gpu_ram() -> str:
     gpu_str = ""
     torch_str = ""
     try:
-        cudadev = torch.cuda.current_device()
-        nvml_device = pynvml.nvmlDeviceGetHandleByIndex(cudadev)
+        cuda_dev = torch.cuda.current_device()
+        nvml_device = pynvml.nvmlDeviceGetHandleByIndex(cuda_dev)
         gpu_info = pynvml.nvmlDeviceGetMemoryInfo(nvml_device)
         gpu_total = int(gpu_info.total / 1e6)
         gpu_free = int(gpu_info.free / 1e6)
@@ -195,14 +198,14 @@ def get_gpu_ram() -> str:
         )
     except AssertionError:
         pass
-    cpu_maxrss = int(
+    cpu_max_rss = int(
         resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e3
         + resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss / 1e3
     )
     cpu_vmem = psutil.virtual_memory()
     cpu_free = int(cpu_vmem.free / 1e6)
     return (
-        f"CPU: (maxrss: {cpu_maxrss:,}mb F: {cpu_free:,}mb) "
+        f"CPU: (max_rss: {cpu_max_rss:,}mb F: {cpu_free:,}mb) "
         f"{gpu_str}"
         f"{torch_str}"
     )
@@ -335,7 +338,7 @@ class StableDiffusionTrainer:
                 "openai/clip-vit-base-patch32"
             ),
         )
-        pipeline.save_pretrained(args.output_path)
+        pipeline.save_pretrained(os.path.join(args.output_path, 'step_' + str(self.global_step)))
 
     def sample(self, prompt: str) -> None:
         # get prompt from random batch
@@ -538,7 +541,7 @@ def main() -> None:
 
     if accelerator.is_main_process:
         os.makedirs(args.output_path, exist_ok=True)
-        # Inform the user of host, and various versions -- useful for debugging isseus.
+        # Inform the user of host, and various versions -- useful for debugging issues.
         print("RUN_NAME:", args.run_name)
         print("HOST:", socket.gethostname())
         print("CUDA:", torch.version.cuda)
@@ -555,9 +558,16 @@ def main() -> None:
     text_encoder = CLIPTextModel.from_pretrained(
         args.model, subfolder="text_encoder", use_auth_token=args.hf_token
     )
-    vae = AutoencoderKL.from_pretrained(
-        args.model, subfolder="vae", use_auth_token=args.hf_token
-    )
+    if args.vae is None:
+        vae = AutoencoderKL.from_pretrained(
+            args.model, subfolder="vae", use_auth_token=args.hf_token
+        )
+    else:
+        vae = AutoencoderKL.from_pretrained(
+            args.vae, use_auth_token=args.hf_token
+        )
+        if accelerator.is_main_process:
+            print('VAE:', args.vae)
     unet = UNet2DConditionModel.from_pretrained(
         args.model, subfolder="unet", use_auth_token=args.hf_token
     )
