@@ -315,12 +315,12 @@ class StableDiffusionTrainer:
             )
         self.run = wandb.init(
             project=args.project_id,
-            name=args.run_name,
+            name=f"{args.run_name}-p{accelerator.local_process_index}",
             config={
                 k: v for k, v in vars(args).items() if k not in ["hf_token"]
             },
             dir=args.output_path + "/wandb",
-            group="accelerate"
+            group=f"{args.run_name}-group"
         )
         self.global_step = 0
 
@@ -510,6 +510,10 @@ class StableDiffusionTrainer:
         loss = torch.nn.functional.mse_loss(
             noise_pred.float(), target.float(), reduction="mean"
         )
+
+        self.run.log({
+            "rank/loss": loss.detach().item()
+        }, step=self.global_step)
 
         avg_loss = self.accelerator.gather_for_metrics(loss).mean()
 
