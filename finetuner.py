@@ -313,14 +313,15 @@ class StableDiffusionTrainer:
                 desc="Total Steps",
                 leave=False,
             )
-            self.run = wandb.init(
-                project=args.project_id,
-                name=args.run_name,
-                config={
-                    k: v for k, v in vars(args).items() if k not in ["hf_token"]
-                },
-                dir=args.output_path + "/wandb",
-            )
+        self.run = wandb.init(
+            project=args.project_id,
+            name=args.run_name,
+            config={
+                k: v for k, v in vars(args).items() if k not in ["hf_token"]
+            },
+            dir=args.output_path + "/wandb",
+            group="accelerate"
+        )
         self.global_step = 0
 
     def save_checkpoint(self):
