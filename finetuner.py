@@ -535,8 +535,7 @@ class StableDiffusionTrainer:
                             "perf/world_samples_per_second": world_samples_per_second,
                             "train/epoch": epoch,
                             "train/step": self.global_step,
-                            "train/samples_seen": self.global_step
-                            * args.batch_size,
+                            "train/samples_seen": self.global_step * self.accelerator.num_processes * args.batch_size,
                         }
                     )
 
