@@ -15,6 +15,7 @@ import wandb
 import gc
 import accelerate
 import pickle
+import itertools
 from connector.store import AspectBucket, AspectDataset, AspectBucketSampler
 
 try:
@@ -165,6 +166,7 @@ parser.add_argument(
     help="A path to a vae to use.",
 )
 parser.add_argument('--use_xformers', type=bool_t, default='False', help='Use memory efficient attention')
+parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder")
 args = parser.parse_args()
 
 
@@ -320,10 +322,13 @@ class StableDiffusionTrainer:
 
     def save_checkpoint(self):
         unet = self.accelerator.unwrap_model(self.unet)
+        text_encoder = self.text_encoder
+        if args.train_text_encoder:
+            text_encoder = self.accelerator.unwrap_model(self.text_encoder)
         if args.use_ema:
             self.ema.copy_to(unet.parameters())
         pipeline = StableDiffusionPipeline(
-            text_encoder=self.text_encoder,
+            text_encoder=text_encoder,
             vae=self.vae,
             unet=unet,
             tokenizer=self.tokenizer,
@@ -342,8 +347,11 @@ class StableDiffusionTrainer:
 
     def sample(self, prompt: str) -> None:
         # get prompt from random batch
+        text_encoder = self.text_encoder
+        if args.train_text_encoder:
+            text_encoder = self.accelerator.unwrap_model(self.text_encoder)
         pipeline = StableDiffusionPipeline(
-            text_encoder=self.text_encoder,
+            text_encoder=text_encoder,
             vae=self.vae,
             unet=self.accelerator.unwrap_model(self.unet),
             tokenizer=self.tokenizer,
@@ -379,79 +387,78 @@ class StableDiffusionTrainer:
                 truncation=True,
             ).input_ids
 
-    def step(self, batch: dict, epoch: int) -> dict:
-        train_loss = 0.0
-        with self.accelerator.accumulate(self.unet):
-            # Convert images to latent space
-            #latents = self.vae.encode(
-            #    batch["pixel_values"].to(self.weight_dtype)
-            #).latent_dist.sample()
-            #latents = latents * L_SCALE_FACTOR
-            #batch["latents"]
+    def sub_step(self, batch: dict, epoch: int) -> torch.Tensor:
+        # Load our network-streamed latents
+        latents = torch.stack(list(map(lambda x: torch.load(x), batch["latents"]))).to(
+            self.accelerator.device, dtype=self.weight_dtype)
 
-            latents = torch.stack(list(map(lambda x: torch.load(x), batch["latents"]))).to(
-                self.accelerator.device, dtype=self.weight_dtype)
+        # Sample noise
+        noise = torch.randn_like(latents)
+        bsz = latents.shape[0]
+        # Sample a random timestep for each image
+        timesteps = torch.randint(
+            0,
+            self.noise_scheduler.num_train_timesteps,
+            (bsz,),
+            device=latents.device,
+        )
+        timesteps = timesteps.long()
 
-            # Sample noise
-            noise = torch.randn_like(latents)
-            bsz = latents.shape[0]
-            # Sample a random timestep for each image
-            timesteps = torch.randint(
-                0,
-                self.noise_scheduler.num_train_timesteps,
-                (bsz,),
-                device=latents.device,
-            )
-            timesteps = timesteps.long()
+        # Add noise to the latents according to the noise magnitude at each timestep
+        # (this is the forward diffusion process)
+        noisy_latents = self.noise_scheduler.add_noise(
+            latents, noise, timesteps
+        )
 
-            # Add noise to the latents according to the noise magnitude at each timestep
-            # (this is the forward diffusion process)
-            noisy_latents = self.noise_scheduler.add_noise(
+        input_ids = list(map(lambda x: self.tokenize(x), batch["captions"]))
+        input_ids = self.tokenizer.pad(
+            {"input_ids": input_ids}, return_tensors="pt", padding=True
+        ).input_ids.to(self.accelerator.device)
+
+        # Get the text embedding for conditioning
+        encoder_hidden_states = self.text_encoder(input_ids)[0]
+
+        # Predict the noise residual and compute loss
+        with torch.autocast("cuda", enabled=args.fp16):
+            noise_pred = self.unet(
+                noisy_latents, timesteps, encoder_hidden_states
+            ).sample
+
+        if self.noise_scheduler.config.prediction_type == "epsilon":
+            target = noise
+        elif self.noise_scheduler.config.prediction_type == "v_prediction":
+            target = self.noise_scheduler.get_velocity(
                 latents, noise, timesteps
             )
-
-            input_ids = list(map(lambda x: self.tokenize(x), batch["captions"]))
-            input_ids = self.tokenizer.pad(
-                {"input_ids": input_ids}, return_tensors="pt", padding=True
-            ).input_ids.to(self.accelerator.device)
-
-            # Get the text embedding for conditioning
-            encoder_hidden_states = self.text_encoder(input_ids)[0]
-
-            # Predict the noise residual and compute loss
-            with torch.autocast("cuda", enabled=args.fp16):
-                noise_pred = self.unet(
-                    noisy_latents, timesteps, encoder_hidden_states
-                ).sample
-
-            if self.noise_scheduler.config.prediction_type == "epsilon":
-                target = noise
-            elif self.noise_scheduler.config.prediction_type == "v_prediction":
-                target = self.noise_scheduler.get_velocity(
-                    latents, noise, timesteps
-                )
-            else:
-                raise ValueError(
-                    f"Invalid prediction type: {self.noise_scheduler.config.prediction_type}"
-                )
-
-            loss = torch.nn.functional.mse_loss(
-                noise_pred.float(), target.float(), reduction="mean"
+        else:
+            raise ValueError(
+                f"Invalid prediction type: {self.noise_scheduler.config.prediction_type}"
             )
 
-            avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-            train_loss += (
-                avg_loss.item() / 1
-            )  # div by gradient accumulation steps
+        loss = torch.nn.functional.mse_loss(
+            noise_pred.float(), target.float(), reduction="mean"
+        )
 
-            # Backprop
-            self.accelerator.backward(loss)
-            if self.accelerator.sync_gradients:
-                self.accelerator.clip_grad_norm_(self.unet.parameters(), 1.0)
-            self.optimizer.step()
-            self.lr_scheduler.step()
-            self.optimizer.zero_grad()
+        avg_loss = self.accelerator.gather_for_metrics(loss).mean()
 
+        # Backprop
+        self.accelerator.backward(loss)
+        if self.accelerator.sync_gradients:
+            params_to_clip = (
+                itertools.chain(self.unet.parameters(), self.text_encoder.parameters())
+                if args.train_text_encoder
+                else self.unet.parameters()
+            )
+            self.accelerator.clip_grad_norm_(params_to_clip, 1.0)
+        self.optimizer.step()
+        self.lr_scheduler.step()
+        self.optimizer.zero_grad()
+
+        return avg_loss
+
+    def step(self, batch: dict, epoch: int) -> dict:
+        with self.accelerator.accumulate(self.unet):
+            loss = self.sub_step(batch, epoch)
         if self.accelerator.sync_gradients:
             # Update EMA
             if args.use_ema:
@@ -464,6 +471,8 @@ class StableDiffusionTrainer:
 
     def train(self) -> None:
         self.unet.train()
+        if args.train_text_encoder:
+            self.text_encoder.train()
         for epoch in range(args.epochs):
             for _, batch in enumerate(self.train_dataloader):
                 step_start = time.perf_counter()
@@ -572,12 +581,15 @@ def main() -> None:
         args.model, subfolder="unet", use_auth_token=args.hf_token
     )
 
-    # Freeze vae and text_encoder
+    # Freeze vae and (maybe) text_encoder
     vae.requires_grad_(False)
-    text_encoder.requires_grad_(False)
+    if not args.train_text_encoder:
+        text_encoder.requires_grad_(False)
 
     if args.gradient_checkpointing:
         unet.enable_gradient_checkpointing()
+        if args.train_text_encoder:
+            text_encoder.gradient_checkpointing_enable()
 
     if args.use_xformers:
         unet.set_use_memory_efficient_attention_xformers(True)
@@ -596,7 +608,7 @@ def main() -> None:
         optimizer_cls = torch.optim.AdamW
 
     optimizer = optimizer_cls(
-        unet.parameters(),
+        unet.parameters() if not args.train_text_encoder else itertools.chain(unet.parameters(), text_encoder.parameters()),
         lr=args.lr,
         betas=(args.adam_beta1, args.adam_beta2),
         eps=args.adam_epsilon,
@@ -609,7 +621,7 @@ def main() -> None:
 
     # load dataset
 
-    def collate_fn(examples):        
+    def collate_fn(examples):
         return {
             "latents": [ example["latent"] for example in examples ],
             "captions": [ example["captions"] for example in examples ]
@@ -638,15 +650,22 @@ def main() -> None:
 
     lr_scheduler = get_scheduler("constant", optimizer=optimizer)
 
-    unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        unet, optimizer, train_dataloader, lr_scheduler
-    )
+    if not args.train_text_encoder:
+        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            unet, optimizer, train_dataloader, lr_scheduler
+        )
+    else:
+        unet, text_encoder, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            unet, text_encoder, optimizer, train_dataloader, lr_scheduler
+        )
 
     weight_dtype = torch.float16 if args.fp16 else torch.float32
 
     # move models to device
     vae = vae.to(accelerator.device, dtype=weight_dtype)
-    text_encoder = text_encoder.to(accelerator.device, dtype=weight_dtype)
+    text_encoder = text_encoder.to(
+        accelerator.device, dtype=weight_dtype if not args.train_text_encoder else torch.float32
+    )
 
     # create ema
     if args.use_ema:
