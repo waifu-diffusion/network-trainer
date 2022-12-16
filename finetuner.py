@@ -378,7 +378,7 @@ class StableDiffusionTrainer:
                         wandb.Image(pipeline(prompt).images[0], caption=prompt)
                     )
         # log images under single caption
-        self.run.log({"images": images})
+        self.run.log({"images": images}, step=self.global_step)
 
         # cleanup so we don't run out of memory
         del pipeline
