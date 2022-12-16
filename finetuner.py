@@ -452,11 +452,11 @@ class StableDiffusionTrainer:
         for idx, l in enumerate(latents):
             if l.size() != latents[largest_latent].size():
                 print(
-                    f'ERROR: Uneven latent size found at step {self.global_step} ({l.size()} -> {largest_latent.size()})! Replacing...'
+                    f'ERROR: Uneven latent size found at step {self.global_step} ({l.size()} -> {latents[largest_latent].size()})! Replacing...'
                 )
                 self.run.alert(
                     title="Uneven Latent Size",
-                    text=f"Step: {self.global_step} ({l.size()} -> {largest_latent.size()})",
+                    text=f"Step: {self.global_step} ({l.size()} -> {latents[largest_latent].size()})",
                     level=wandb.AlertLevel.WARN
                 )
 
