@@ -438,7 +438,27 @@ class StableDiffusionTrainer:
 
     def sub_step(self, batch: dict, epoch: int) -> torch.Tensor:
         # Load our network-streamed latents
-        latents = torch.stack(list(map(lambda x: torch.load(x), batch["latents"]))).to(
+        latents = list(map(lambda x: torch.load(x), batch["latents"]))
+        # Make sure we have latents of all the same size
+        # (this should be true unless there is a db or preprocessing error)
+        latent_sizes = {}
+        for idx, l in enumerate(latents):
+            if l.size() in latent_sizes:
+                latent_sizes[l.size()] = (idx, latent_sizes[l.size()][1] + 1)
+            else:
+                latent_sizes[l.size()] = (idx, 1)
+        largest_latent = max(list(latent_sizes.items()), key=lambda x:x[1][0])[1][0]
+
+        for idx, l in enumerate(latents):
+            if l.size() != latents[largest_latent].size():
+                print(
+                    f'ERROR: Uneven latent size found at step {self.global_step} ({l.size()} -> {largest_latent.size()})! Replacing...'
+                )
+                latents[idx] = latents[largest_latent].clone()
+                batch["captions"][idx] = batch["captions"][largest_latent]
+
+        # Finally stack our latents of the same guaranteed size
+        latents = torch.stack(latents).to(
             self.accelerator.device, dtype=self.weight_dtype)
 
         # Sample noise
@@ -459,6 +479,7 @@ class StableDiffusionTrainer:
             latents, noise, timesteps
         )
 
+        # Encode captions with respect to extended mode and penultimate options
         encoder_hidden_states = self.encode(batch["captions"])
 
         # Predict the noise residual and compute loss
@@ -467,6 +488,7 @@ class StableDiffusionTrainer:
                 noisy_latents, timesteps, encoder_hidden_states
             ).sample
 
+        # Pew pew
         if self.noise_scheduler.config.prediction_type == "epsilon":
             target = noise
         elif self.noise_scheduler.config.prediction_type == "v_prediction":
