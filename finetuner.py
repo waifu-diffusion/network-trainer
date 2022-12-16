@@ -454,6 +454,12 @@ class StableDiffusionTrainer:
                 print(
                     f'ERROR: Uneven latent size found at step {self.global_step} ({l.size()} -> {largest_latent.size()})! Replacing...'
                 )
+                self.run.alert(
+                    title="Uneven Latent Size",
+                    text=f"Step: {self.global_step} ({l.size()} -> {largest_latent.size()})",
+                    level=wandb.AlertLevel.WARN
+                )
+
                 latents[idx] = latents[largest_latent].clone()
                 batch["captions"][idx] = batch["captions"][largest_latent]
 
