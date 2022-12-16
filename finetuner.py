@@ -321,7 +321,7 @@ class StableDiffusionTrainer:
                 },
                 dir=args.output_path + "/wandb",
             )
-            self.global_step = 0
+        self.global_step = 0
 
     def save_checkpoint(self):
         unet = self.accelerator.unwrap_model(self.unet)
@@ -550,6 +550,7 @@ class StableDiffusionTrainer:
 
                 logs = self.step(batch, epoch)
 
+                self.global_step += 1
                 if self.accelerator.is_main_process:
                     rank_samples_per_second = args.batch_size * (
                         1 / (time.perf_counter() - step_start)
@@ -566,8 +567,6 @@ class StableDiffusionTrainer:
                             "train/samples_seen": self.global_step * self.accelerator.num_processes * args.batch_size,
                         }
                     )
-
-                    self.global_step += 1
 
                     # Output GPU RAM to flush tqdm
                     if not hasattr(self, 'report_idx'):
