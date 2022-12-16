@@ -346,6 +346,7 @@ class StableDiffusionTrainer:
                 "openai/clip-vit-base-patch32"
             ),
         )
+        print(f'Saving model (step: {self.global_step})...')
         pipeline.save_pretrained(os.path.join(args.output_path, 'step_' + str(self.global_step)))
 
     def sample(self, prompt: str) -> None:
