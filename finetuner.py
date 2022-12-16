@@ -16,6 +16,7 @@ import gc
 import accelerate
 import pickle
 import itertools
+import numpy as np
 from connector.store import AspectBucket, AspectDataset, AspectBucketSampler
 
 try:
@@ -167,6 +168,8 @@ parser.add_argument(
 )
 parser.add_argument('--use_xformers', type=bool_t, default='False', help='Use memory efficient attention')
 parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder")
+parser.add_argument('--extended_mode_chunks', type=int, default=0, help='Enables extended mode for tokenization with given amount of maximum chunks. Values < 2 disable.')
+parser.add_argument('--clip_penultimate', action="store_true", default=False, help='Use penultimate CLIP layer for text embedding')
 args = parser.parse_args()
 
 
@@ -379,13 +382,58 @@ class StableDiffusionTrainer:
         del pipeline
         gc.collect()
 
-    def tokenize(self, text):
-        return self.tokenizer(
-                text,
-                max_length=self.tokenizer.model_max_length,
-                padding="do_not_pad",
-                truncation=True,
-            ).input_ids
+    def encode(self, captions):
+        if args.extended_mode_chunks < 2:
+            max_length = self.tokenizer.model_max_length - 2
+            input_ids = [self.tokenizer([example], truncation=True, return_length=True, return_overflowing_tokens=False, padding=False, add_special_tokens=False, max_length=max_length).input_ids for example in captions if example is not None]
+        else:
+            max_length = self.tokenizer.model_max_length
+            max_chunks = args.extended_mode_chunks
+            input_ids = [self.tokenizer([example], truncation=True, return_length=True, return_overflowing_tokens=False, padding=False, add_special_tokens=False, max_length=(max_length * max_chunks) - (max_chunks * 2)).input_ids[0] for example in captions if example is not None]
+
+        text_encoder = self.text_encoder if not args.train_text_encoder else self.accelerator.unwrap_model(self.text_encoder)
+
+        if args.extended_mode_chunks < 2:
+            for i, x in enumerate(input_ids):
+                for j, y in enumerate(x):
+                    input_ids[i][j] = [self.tokenizer.bos_token_id, *y, *np.full((self.tokenizer.model_max_length - len(y) - 1), self.tokenizer.eos_token_id)]
+
+            if args.clip_penultimate:
+                input_ids = [text_encoder.text_model.final_layer_norm(text_encoder(torch.asarray(input_id).to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])[0] for input_id in input_ids]
+            else:
+                input_ids = [text_encoder(torch.asarray(input_id).to(self.accelerator.device), output_hidden_states=True).last_hidden_state[0] for input_id in input_ids]
+        else:
+            max_standard_tokens = max_length - 2
+            max_chunks = args.extended_mode_chunks
+            max_len = np.ceil(max(len(x) for x in input_ids) / max_standard_tokens).astype(int).item() * max_standard_tokens
+            if max_len > max_standard_tokens:
+                z = None
+                for i, x in enumerate(input_ids):
+                    if len(x) < max_len:
+                        input_ids[i] = [*x, *np.full((max_len - len(x)), self.tokenizer.eos_token_id)]
+                batch_t = torch.tensor(input_ids)
+                chunks = [batch_t[:, i:i + max_standard_tokens] for i in range(0, max_len, max_standard_tokens)]
+                for chunk in chunks:
+                    chunk = torch.cat((torch.full((chunk.shape[0], 1), self.tokenizer.bos_token_id), chunk, torch.full((chunk.shape[0], 1), self.tokenizer.eos_token_id)), 1)
+                    if z is None:
+                        if args.clip_penultimate:
+                            z = text_encoder.text_model.final_layer_norm(text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])
+                        else:
+                            z = text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True).last_hidden_state
+                    else:
+                        if args.clip_penultimate:
+                            z = torch.cat((z, text_encoder.text_model.final_layer_norm(text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])), dim=-2)
+                        else:
+                            z = torch.cat((z, text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True).last_hidden_state), dim=-2)
+                input_ids = z
+            else:
+                for i, x in enumerate(input_ids):
+                    input_ids[i] = [self.tokenizer.bos_token_id, *x, *np.full((self.tokenizer.model_max_length - len(x) - 1), self.tokenizer.eos_token_id)]
+                if args.clip_penultimate:    
+                    input_ids = text_encoder.text_model.final_layer_norm(text_encoder(torch.asarray(input_ids).to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])
+                else:
+                    input_ids = text_encoder(torch.asarray(input_ids).to(self.accelerator.device), output_hidden_states=True).last_hidden_state
+        return torch.stack(tuple(input_ids))
 
     def sub_step(self, batch: dict, epoch: int) -> torch.Tensor:
         # Load our network-streamed latents
@@ -410,13 +458,7 @@ class StableDiffusionTrainer:
             latents, noise, timesteps
         )
 
-        input_ids = list(map(lambda x: self.tokenize(x), batch["captions"]))
-        input_ids = self.tokenizer.pad(
-            {"input_ids": input_ids}, return_tensors="pt", padding=True
-        ).input_ids.to(self.accelerator.device)
-
-        # Get the text embedding for conditioning
-        encoder_hidden_states = self.text_encoder(input_ids)[0]
+        encoder_hidden_states = self.encode(batch["captions"])
 
         # Predict the noise residual and compute loss
         with torch.autocast("cuda", enabled=args.fp16):
@@ -618,8 +660,6 @@ def main() -> None:
     noise_scheduler = DDPMScheduler.from_pretrained(
         args.model, subfolder="scheduler", use_auth_token=args.hf_token
     )
-
-    # load dataset
 
     def collate_fn(examples):
         return {
