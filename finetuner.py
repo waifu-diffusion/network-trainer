@@ -24,7 +24,7 @@ try:
 except pynvml.nvml.NVMLError_LibraryNotFound:
     pynvml = None
 
-from typing import Iterable
+from typing import Iterable, Optional
 from diffusers import (
     AutoencoderKL,
     UNet2DConditionModel,
@@ -264,6 +264,41 @@ class EMAModel:
         for s_param, param in zip(self.shadow_params, parameters):
             param.data.copy_(s_param.data)
 
+    def store(
+        self,
+        parameters: Optional[Iterable[torch.nn.Parameter]] = None
+    ) -> None:
+        """
+        Save the current parameters for restoring later.
+        Args:
+            parameters: Iterable of `torch.nn.Parameter`; the parameters to be
+                temporarily stored. If `None`, the parameters of with which this
+                `ExponentialMovingAverage` was initialized will be used.
+        """
+        self.collected_params = [param.clone() for param in parameters]
+
+    def restore(
+        self,
+        parameters: Optional[Iterable[torch.nn.Parameter]] = None
+    ) -> None:
+        """
+        Restore the parameters stored with the `store` method.
+        Useful to validate the model with EMA parameters without affecting the
+        original optimization process. Store the parameters before the
+        `copy_to` method. After validation (or model saving), use this to
+        restore the former parameters.
+        Args:
+            parameters: Iterable of `torch.nn.Parameter`; the parameters to be
+                updated with the stored parameters. If `None`, the
+                parameters with which this `ExponentialMovingAverage` was
+                initialized will be used.
+        """
+        for c_param, param in zip(self.collected_params, parameters):
+            param.data.copy_(c_param.data)
+
+        del self.collected_params
+        gc.collect()
+
     def to(self, device=None, dtype=None) -> None:
         r"""Move internal buffers of the ExponentialMovingAverage to `device`.
         Args:
@@ -330,6 +365,7 @@ class StableDiffusionTrainer:
         if args.train_text_encoder:
             text_encoder = self.accelerator.unwrap_model(self.text_encoder)
         if args.use_ema:
+            self.ema.store(unet.parameters())
             self.ema.copy_to(unet.parameters())
         pipeline = StableDiffusionPipeline(
             text_encoder=text_encoder,
@@ -349,6 +385,8 @@ class StableDiffusionTrainer:
         )
         print(f'Saving model (step: {self.global_step})...')
         pipeline.save_pretrained(os.path.join(args.output_path, 'step_' + str(self.global_step)))
+        if args.use_ema:
+            self.ema.restore(unet.parameters())
 
     def sample(self, prompt: str) -> None:
         # get prompt from random batch
