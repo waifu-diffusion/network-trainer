@@ -504,7 +504,7 @@ class StableDiffusionTrainer:
 
         # Finally stack our latents of the same guaranteed size
         latents = torch.stack(latents).to(
-            self.accelerator.device, dtype=self.weight_dtype)
+            self.accelerator.device, dtype=torch.float32)
 
         # Sample noise
         noise = torch.randn_like(latents)
@@ -528,10 +528,7 @@ class StableDiffusionTrainer:
         encoder_hidden_states = self.encode(batch["captions"])
 
         # Predict the noise residual and compute loss
-        with torch.autocast("cuda", enabled=args.fp16):
-            noise_pred = self.unet(
-                noisy_latents, timesteps, encoder_hidden_states
-            ).sample
+        noise_pred = self.unet(noisy_latents, timesteps, encoder_hidden_states).sample
 
         # Pew pew
         if self.noise_scheduler.config.prediction_type == "epsilon":
@@ -549,12 +546,6 @@ class StableDiffusionTrainer:
             noise_pred.float(), target.float(), reduction="mean"
         )
 
-        self.run.log({
-            "rank/loss": loss.detach().item()
-        }, step=self.global_step)
-
-        avg_loss = self.accelerator.gather_for_metrics(loss).mean()
-
         # Backprop
         self.accelerator.backward(loss)
         if self.accelerator.sync_gradients:
@@ -568,7 +559,11 @@ class StableDiffusionTrainer:
         self.lr_scheduler.step()
         self.optimizer.zero_grad()
 
-        return avg_loss
+        self.run.log({
+            "rank/loss": loss.detach().item()
+        }, step=self.global_step)
+
+        return self.accelerator.gather_for_metrics(loss).mean()
 
     def step(self, batch: dict, epoch: int) -> dict:
         with self.accelerator.accumulate(self.unet):
@@ -584,10 +579,10 @@ class StableDiffusionTrainer:
         }
 
     def train(self) -> None:
-        self.unet.train()
-        if args.train_text_encoder:
-            self.text_encoder.train()
         for epoch in range(args.epochs):
+            self.unet.train()
+            if args.train_text_encoder:
+                self.text_encoder.train()
             for _, batch in enumerate(self.train_dataloader):
                 step_start = time.perf_counter()
 
@@ -773,9 +768,12 @@ def main() -> None:
 
     # move models to device
     vae = vae.to(accelerator.device, dtype=weight_dtype)
-    text_encoder = text_encoder.to(
-        accelerator.device, dtype=weight_dtype if not args.train_text_encoder else torch.float32
-    )
+    if not args.train_text_encoder:
+        text_encoder = text_encoder.to(
+            accelerator.device, dtype=weight_dtype
+        )
+    else:
+         text_encoder = text_encoder.to(accelerator.device)       
 
     # create ema
     if args.use_ema:
