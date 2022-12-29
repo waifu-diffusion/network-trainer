@@ -726,10 +726,23 @@ def main() -> None:
         args.model, subfolder="scheduler", use_auth_token=args.hf_token
     )
 
+    def drop_random(data):
+        # 1/10 chance of dropping all conditioning
+        # 9/10 chance to use the equation https://www.desmos.com/calculator/yrfoynzfcp
+        # to keep a random percent of the data, where the random number is the x-axis
+        if random.randint(0, 9) != 0:
+            x = random.randint(0, 100)
+            if x >= 50:
+                return data
+            else:
+                return data[:len(data) * x * 2 // 100]
+        else:
+            return ''
+
     def collate_fn(examples):
         return {
-            "latents": [ example["latent"] for example in examples ],
-            "captions": [ example["captions"] for example in examples ]
+            "latents": [example["latent"] for example in examples],
+            "captions": [drop_random(example["captions"]) for example in examples]
         }
 
     with open(args.dataset, 'rb') as f:
