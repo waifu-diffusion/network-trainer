@@ -40,7 +40,6 @@ from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
 L_SCALE_FACTOR = 0.18215
 
 # defaults should be good for everyone
-# TODO: add custom VAE support. should be simple with diffusers
 bool_t = lambda x: (str(x).lower() in ["true", "1", "t", "y", "yes"])
 parser = argparse.ArgumentParser(description="Stable Diffusion Finetuner")
 parser.add_argument(
@@ -78,6 +77,12 @@ parser.add_argument(
     default=0.1,
     help="Percentage chance of dropping out the text condition per batch. Ranges from 0.0 to 1.0 where 1.0 means 100% text condition dropout.",
 )  # 10% dropout probability
+parser.add_argument(
+    "--partial_dropout",
+    type=bool,
+    default=True,
+    help="Enable randomly dropping part of the conditioning"
+)
 parser.add_argument(
     "--gradient_checkpointing",
     dest="gradient_checkpointing",
@@ -469,7 +474,7 @@ class StableDiffusionTrainer:
             else:
                 for i, x in enumerate(input_ids):
                     input_ids[i] = [self.tokenizer.bos_token_id, *x, *np.full((self.tokenizer.model_max_length - len(x) - 1), self.tokenizer.eos_token_id)]
-                if args.clip_penultimate:    
+                if args.clip_penultimate:
                     input_ids = text_encoder.text_model.final_layer_norm(text_encoder(torch.asarray(input_ids).to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])
                 else:
                     input_ids = text_encoder(torch.asarray(input_ids).to(self.accelerator.device), output_hidden_states=True).last_hidden_state
@@ -727,16 +732,18 @@ def main() -> None:
     )
 
     def drop_random(data):
-        # 1/10 chance of dropping all conditioning
-        # 9/10 chance to use the equation https://www.desmos.com/calculator/yrfoynzfcp
-        # to keep a random percent of the data, where the random number is the x-axis
-        if random.randint(0, 9) != 0:
-            x = random.randint(0, 100)
-            if x >= 50:
-                return data
-            else:
-                return data[:len(data) * x * 2 // 100]
+        if random.random() > args.ucg:
+            if args.partial_dropout:
+                # the equation https://www.desmos.com/calculator/yrfoynzfcp is used
+                # to keep a random percent of the data, where the random number is the x-axis
+                x = random.randint(0, 100)
+                if x >= 50:
+                    return ', '.join(data)
+                else:
+                    return ', '.join(data[:len(data) * x * 2 // 100])
+            return ', '.join(data)
         else:
+            # drop for unconditional guidance
             return ''
 
     def collate_fn(examples):
@@ -786,7 +793,7 @@ def main() -> None:
             accelerator.device, dtype=weight_dtype
         )
     else:
-         text_encoder = text_encoder.to(accelerator.device)       
+         text_encoder = text_encoder.to(accelerator.device)
 
     # create ema
     if args.use_ema:
