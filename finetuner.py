@@ -16,6 +16,7 @@ import gc
 import accelerate
 import pickle
 import itertools
+import copy
 import numpy as np
 from connector.store import AspectBucket, AspectDataset, AspectBucketSampler
 
@@ -439,14 +440,16 @@ class StableDiffusionTrainer:
         text_encoder = self.text_encoder if not args.train_text_encoder else self.accelerator.unwrap_model(self.text_encoder)
 
         if args.extended_mode_chunks < 2:
+            attn = copy.deepcopy(input_ids)
             for i, x in enumerate(input_ids):
                 for j, y in enumerate(x):
-                    input_ids[i][j] = [self.tokenizer.bos_token_id, *y, *np.full((self.tokenizer.model_max_length - len(y) - 1), self.tokenizer.eos_token_id)]
+                    input_ids[i][j] = [self.tokenizer.bos_token_id, *y, *np.full((min(self.tokenizer.model_max_length - len(y) - 1, 1)), self.tokenizer.eos_token_id), *np.full((max(self.tokenizer.model_max_length - len(y) - 2, 0)), self.tokenizer.pad_token_id)]
+                    attn[i][j] = [*np.full(len(y) + 2, 1), *np.full(self.tokenizer.model_max_length - len(y) - 2, 0)]
 
             if args.clip_penultimate:
-                input_ids = [text_encoder.text_model.final_layer_norm(text_encoder(torch.asarray(input_id).to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])[0] for input_id in input_ids]
+                input_ids = [text_encoder.text_model.final_layer_norm(text_encoder(torch.asarray(input_id).to(self.accelerator.device), output_hidden_states=True, attention_mask=torch.asarray(attn).to(self.accelerator.device))['hidden_states'][-2])[0] for (input_id, attn) in zip(input_ids, attn)]
             else:
-                input_ids = [text_encoder(torch.asarray(input_id).to(self.accelerator.device), output_hidden_states=True).last_hidden_state[0] for input_id in input_ids]
+                input_ids = [text_encoder(torch.asarray(input_id).to(self.accelerator.device), output_hidden_states=True, attention_mask=torch.asarray(attn).to(self.accelerator.device)).last_hidden_state[0] for (input_id, attn) in zip(input_ids, attn)]
         else:
             max_standard_tokens = max_length - 2
             max_chunks = args.extended_mode_chunks
@@ -455,29 +458,37 @@ class StableDiffusionTrainer:
                 z = None
                 for i, x in enumerate(input_ids):
                     if len(x) < max_len:
-                        input_ids[i] = [*x, *np.full((max_len - len(x)), self.tokenizer.eos_token_id)]
+                        input_ids[i] = [*x, *np.full(min(max_len - len(x), 1), self.tokenizer.eos_token_id), *np.full(max(max_len - len(x) - 1, 0), self.tokenizer.pad_token_id)]
                 batch_t = torch.tensor(input_ids)
                 chunks = [batch_t[:, i:i + max_standard_tokens] for i in range(0, max_len, max_standard_tokens)]
                 for chunk in chunks:
-                    chunk = torch.cat((torch.full((chunk.shape[0], 1), self.tokenizer.bos_token_id), chunk, torch.full((chunk.shape[0], 1), self.tokenizer.eos_token_id)), 1)
+                    chunk = torch.cat((torch.full((chunk.shape[0], 1), self.tokenizer.bos_token_id), chunk, torch.full((chunk.shape[0], 1), self.tokenizer.pad_token_id)), 1)
+                    attn = torch.asarray(
+                        [
+                            list(map(lambda x:0 if x.detach().item() == self.tokenizer.pad_token_id else 1, [x for x in sc]))
+                            for sc in chunk
+                        ]
+                    )
                     if z is None:
                         if args.clip_penultimate:
-                            z = text_encoder.text_model.final_layer_norm(text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])
+                            z = text_encoder.text_model.final_layer_norm(text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True, attention_mask=torch.asarray(attn).to(self.accelerator.device))['hidden_states'][-2])
                         else:
-                            z = text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True).last_hidden_state
+                            z = text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True, attention_mask=torch.asarray(attn).to(self.accelerator.device)).last_hidden_state
                     else:
                         if args.clip_penultimate:
-                            z = torch.cat((z, text_encoder.text_model.final_layer_norm(text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])), dim=-2)
+                            z = torch.cat((z, text_encoder.text_model.final_layer_norm(text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True, attention_mask=torch.asarray(attn).to(self.accelerator.device))['hidden_states'][-2])), dim=-2)
                         else:
-                            z = torch.cat((z, text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True).last_hidden_state), dim=-2)
+                            z = torch.cat((z, text_encoder(chunk.to(self.accelerator.device), output_hidden_states=True, attention_mask=torch.asarray(attn).to(self.accelerator.device)).last_hidden_state), dim=-2)
                 input_ids = z
             else:
+                attn = copy.deepcopy(input_ids)
                 for i, x in enumerate(input_ids):
-                    input_ids[i] = [self.tokenizer.bos_token_id, *x, *np.full((self.tokenizer.model_max_length - len(x) - 1), self.tokenizer.eos_token_id)]
+                    input_ids[i] = [self.tokenizer.bos_token_id, *x, *np.full((min(self.tokenizer.model_max_length - len(x) - 1, 1)), self.tokenizer.eos_token_id), *np.full((max(self.tokenizer.model_max_length - len(x) - 2, 0)), self.tokenizer.pad_token_id)]
+                    attn[i] = [*np.full(len(x) + 2, 1), *np.full(self.tokenizer.model_max_length - len(x) - 2, 0)]
                 if args.clip_penultimate:
-                    input_ids = text_encoder.text_model.final_layer_norm(text_encoder(torch.asarray(input_ids).to(self.accelerator.device), output_hidden_states=True)['hidden_states'][-2])
+                    input_ids = text_encoder.text_model.final_layer_norm(text_encoder(torch.asarray(input_ids).to(self.accelerator.device), output_hidden_states=True, attention_mask=torch.asarray(attn).to(self.accelerator.device))['hidden_states'][-2])
                 else:
-                    input_ids = text_encoder(torch.asarray(input_ids).to(self.accelerator.device), output_hidden_states=True).last_hidden_state
+                    input_ids = text_encoder(torch.asarray(input_ids).to(self.accelerator.device), output_hidden_states=True, attention_mask=torch.asarray(attn).to(self.accelerator.device)).last_hidden_state
         return torch.stack(tuple(input_ids))
 
     def sub_step(self, batch: dict, epoch: int) -> torch.Tensor:
