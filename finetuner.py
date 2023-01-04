@@ -64,7 +64,7 @@ parser.add_argument(
     required=True,
     help="The path to the pickled data file to use for finetuning.",
 )
-parser.add_argument("--lr", type=float, default=5e-5, help="Learning rate")
+parser.add_argument("--lr", type=float, default=5e-6, help="Learning rate")
 parser.add_argument(
     "--epochs", type=int, default=10, help="Number of epochs to train for"
 )
