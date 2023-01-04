@@ -390,7 +390,7 @@ class StableDiffusionTrainer:
             ),
         )
         print(f'Saving model (step: {self.global_step})...')
-        pipeline.save_pretrained(os.path.join(args.output_path, 'step_' + str(self.global_step)))
+        pipeline.save_pretrained(os.path.join(args.output_path, 'step_' + str(self.global_step)), safe_serialization=True)
         if args.use_ema:
             self.ema.restore(unet.parameters())
 
