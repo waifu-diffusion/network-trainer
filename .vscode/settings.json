@@ -8,6 +8,7 @@
         "bitsandbytes",
         "checkpointing",
         "cuda",
+        "dbooru",
         "DDPM",
         "dotenv",
         "dtype",
