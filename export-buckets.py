@@ -21,6 +21,7 @@ args = parser.parse_args()
 
 print('creating image store...')
 image_store = ImageStore()
+print(f'{len(image_store)} image(s).')
 print('creating aspect buckets...')
 bucket = AspectBucket(image_store, args.batch_size)
 print('writing aspect buckets to file...')
