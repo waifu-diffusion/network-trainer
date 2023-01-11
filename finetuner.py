@@ -172,6 +172,21 @@ parser.add_argument(
     required=False,
     help="A path to a vae to use.",
 )
+parser.add_argument(
+    "--lr_scheduler",
+    type=str,
+    default="constant",
+    help=(
+        'The scheduler type to use. Choose between ["linear", "cosine", "cosine_with_restarts", "polynomial",'
+        ' "constant", "constant_with_warmup"]'
+    ),
+)
+parser.add_argument(
+    "--lr_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+)
+parser.add_argument(
+    "--lr_num_cycles", type=int, default=1, help="Number of cycles for cosine_with_restarts lr scheduler."
+)
 parser.add_argument('--use_xformers', type=bool_t, default='False', help='Use memory efficient attention')
 parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder")
 parser.add_argument('--extended_mode_chunks', type=int, default=0, help='Enables extended mode for tokenization with given amount of maximum chunks. Values < 2 disable.')
@@ -784,7 +799,20 @@ def main() -> None:
         collate_fn=collate_fn
     )
 
-    lr_scheduler = get_scheduler("constant", optimizer=optimizer)
+    if args.lr_scheduler == 'cosine_with_restarts':
+        lr_scheduler = transformers.get_cosine_with_hard_restarts_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=args.lr_warmup_steps,
+            num_training_steps=args.epochs * len(train_dataloader),
+            num_cycles=args.lr_num_cycles
+        )
+    else:
+        lr_scheduler = get_scheduler(
+            args.lr_scheduler,
+            optimizer=optimizer,
+            num_warmup_steps=args.lr_warmup_steps,
+            num_training_steps=args.epochs * len(train_dataloader)
+        )
 
     if not args.train_text_encoder:
         unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
