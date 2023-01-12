@@ -8,6 +8,7 @@ import diffusers
 import random
 import tqdm
 import resource
+import math
 import psutil
 import pynvml
 import sys
@@ -36,6 +37,8 @@ from diffusers import (
 from diffusers.pipelines.stable_diffusion import StableDiffusionSafetyChecker
 from diffusers.optimization import get_scheduler
 from transformers import CLIPFeatureExtractor, CLIPTextModel, CLIPTokenizer
+from torch.optim.lr_scheduler import LambdaLR
+from torch.optim import Optimizer
 
 # Latent Scale Factor - https://github.com/huggingface/diffusers/issues/437
 L_SCALE_FACTOR = 0.18215
@@ -186,6 +189,12 @@ parser.add_argument(
 )
 parser.add_argument(
     "--lr_num_cycles", type=int, default=1, help="Number of cycles for cosine_with_restarts lr scheduler."
+)
+parser.add_argument(
+    "--lr_min_scale", type=float, default=0.0, help="Minimum scaling factor for cosine_with_restarts lr scheduler."
+)
+parser.add_argument(
+    "--lr_max_scale", type=float, default=1.0, help="Maximum scaling factor for cosine_with_restarts lr scheduler."
 )
 parser.add_argument('--use_xformers', type=bool_t, default='False', help='Use memory efficient attention')
 parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder")
@@ -661,6 +670,24 @@ class StableDiffusionTrainer:
         self.accelerator.wait_for_everyone()
         self.save_checkpoint()
 
+def get_cosine_with_hard_restarts_schedule_with_warmup_and_scaling(
+    optimizer: Optimizer,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    num_cycles: float = 1, 
+    last_epoch: int = -1,
+    max_scale: float = 1.0,
+    min_scale: float = 0.0
+):
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        if progress >= 1.0:
+            return 0.0
+        return max(0.0, 0.5 * (max_scale + min_scale + (max_scale - min_scale) * math.cos(math.pi * ((float(num_cycles) * progress) % 1.0))))
+
+    return LambdaLR(optimizer, lr_lambda, last_epoch)
 
 def main() -> None:
     if args.hf_token is None:
@@ -800,11 +827,13 @@ def main() -> None:
     )
 
     if args.lr_scheduler == 'cosine_with_restarts':
-        lr_scheduler = transformers.get_cosine_with_hard_restarts_schedule_with_warmup(
+        lr_scheduler = get_cosine_with_hard_restarts_schedule_with_warmup_and_scaling(
             optimizer=optimizer,
             num_warmup_steps=args.lr_warmup_steps,
             num_training_steps=args.epochs * len(train_dataloader),
-            num_cycles=args.lr_num_cycles
+            num_cycles=args.lr_num_cycles,
+            max_scale=args.lr_max_scale,
+            min_scale=args.lr_min_scale
         )
     else:
         lr_scheduler = get_scheduler(
