@@ -58,4 +58,5 @@ typing-inspect==0.8.0
 typing_extensions==4.4.0
 urllib3==1.26.13
 wandb==0.13.7
+websockets==10.4
 zipp==3.11.0

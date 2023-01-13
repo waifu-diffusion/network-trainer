@@ -200,6 +200,9 @@ parser.add_argument('--use_xformers', type=bool_t, default='False', help='Use me
 parser.add_argument("--train_text_encoder", action="store_true", help="Whether to train the text encoder")
 parser.add_argument('--extended_mode_chunks', type=int, default=0, help='Enables extended mode for tokenization with given amount of maximum chunks. Values < 2 disable.')
 parser.add_argument('--clip_penultimate', action="store_true", default=False, help='Use penultimate CLIP layer for text embedding')
+parser.add_argument(
+    "--caption_log_steps", type=int, default=0, help="Number of steps to log captions, 0 disables"
+)
 args = parser.parse_args()
 
 
@@ -654,6 +657,20 @@ class StableDiffusionTrainer:
                     if self.report_idx % 100 == 0:
                         print(f"\nLOSS: {logs['train/loss']} {get_gpu_ram()}", file=sys.stderr)
                         sys.stderr.flush()
+                    if args.caption_log_steps > 0 and self.report_idx % args.caption_log_steps == 0:
+                        if not hasattr(self, 'captions_table'):
+                            self.captions_table_labels = ['step']
+                            for key in batch:
+                                if key != 'latents' and key != 'captions':
+                                    self.captions_table_labels.append(key)
+                            self.captions_table_labels.append('captions')
+                            self.captions_table = wandb.Table(columns=self.captions_table_labels)
+                        for i in range(len(batch["captions"])):
+                            caption_data = [self.global_step]
+                            for key in self.captions_table_labels[1:]:
+                                caption_data.append(batch[key][i])
+                            self.captions_table.add_data(*caption_data)
+                        self.run.log({"rank/captions": self.captions_table}, step=self.global_step)
 
                     self.progress_bar.update(1)
                     self.progress_bar.set_postfix(**logs)
@@ -800,10 +817,14 @@ def main() -> None:
             return ''
 
     def collate_fn(examples):
-        return {
+        return_dict = {
             "latents": [example["latent"] for example in examples],
             "captions": [drop_random(example["captions"]) for example in examples]
         }
+        for key in examples[0]:
+            if key != "latents" and key != "captions":
+                return_dict[key] = [example[key] for example in examples]
+        return return_dict
 
     with open(args.dataset, 'rb') as f:
         bucket: AspectBucket = pickle.load(f)
