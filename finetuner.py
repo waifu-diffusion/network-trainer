@@ -633,7 +633,7 @@ class StableDiffusionTrainer:
 
                 self.global_step += 1
 
-                if args.caption_log_steps > 0 and self.report_idx % args.caption_log_steps == 0:
+                if args.caption_log_steps > 0 and self.global_step % args.caption_log_steps == 0:
                     self.captions_table_labels = ['step']
                     for key in batch:
                         if key != 'latents' and key != 'captions':
