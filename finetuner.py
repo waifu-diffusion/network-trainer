@@ -632,6 +632,21 @@ class StableDiffusionTrainer:
                 logs = self.step(batch, epoch)
 
                 self.global_step += 1
+
+                if args.caption_log_steps > 0 and self.report_idx % args.caption_log_steps == 0:
+                    self.captions_table_labels = ['step']
+                    for key in batch:
+                        if key != 'latents' and key != 'captions':
+                            self.captions_table_labels.append(key)
+                    self.captions_table_labels.append('captions')
+                    self.captions_table = wandb.Table(columns=self.captions_table_labels)
+                    for i in range(len(batch["captions"])):
+                        caption_data = [self.global_step]
+                        for key in self.captions_table_labels[1:]:
+                            caption_data.append(batch[key][i])
+                        self.captions_table.add_data(*caption_data)
+                    self.run.log({"rank/captions": self.captions_table}, step=self.global_step)
+
                 if self.accelerator.is_main_process:
                     rank_samples_per_second = args.batch_size * (
                         1 / (time.perf_counter() - step_start)
@@ -657,19 +672,6 @@ class StableDiffusionTrainer:
                     if self.report_idx % 100 == 0:
                         print(f"\nLOSS: {logs['train/loss']} {get_gpu_ram()}", file=sys.stderr)
                         sys.stderr.flush()
-                    if args.caption_log_steps > 0 and self.report_idx % args.caption_log_steps == 0:
-                        self.captions_table_labels = ['step']
-                        for key in batch:
-                            if key != 'latents' and key != 'captions':
-                                self.captions_table_labels.append(key)
-                        self.captions_table_labels.append('captions')
-                        self.captions_table = wandb.Table(columns=self.captions_table_labels)
-                        for i in range(len(batch["captions"])):
-                            caption_data = [self.global_step]
-                            for key in self.captions_table_labels[1:]:
-                                caption_data.append(batch[key][i])
-                            self.captions_table.add_data(*caption_data)
-                        self.run.log({"rank/captions": self.captions_table}, step=self.global_step)
 
                     self.progress_bar.update(1)
                     self.progress_bar.set_postfix(**logs)
