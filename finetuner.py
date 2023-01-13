@@ -658,13 +658,12 @@ class StableDiffusionTrainer:
                         print(f"\nLOSS: {logs['train/loss']} {get_gpu_ram()}", file=sys.stderr)
                         sys.stderr.flush()
                     if args.caption_log_steps > 0 and self.report_idx % args.caption_log_steps == 0:
-                        if not hasattr(self, 'captions_table'):
-                            self.captions_table_labels = ['step']
-                            for key in batch:
-                                if key != 'latents' and key != 'captions':
-                                    self.captions_table_labels.append(key)
-                            self.captions_table_labels.append('captions')
-                            self.captions_table = wandb.Table(columns=self.captions_table_labels)
+                        self.captions_table_labels = ['step']
+                        for key in batch:
+                            if key != 'latents' and key != 'captions':
+                                self.captions_table_labels.append(key)
+                        self.captions_table_labels.append('captions')
+                        self.captions_table = wandb.Table(columns=self.captions_table_labels)
                         for i in range(len(batch["captions"])):
                             caption_data = [self.global_step]
                             for key in self.captions_table_labels[1:]:
