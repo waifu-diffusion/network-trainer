@@ -822,7 +822,7 @@ def main() -> None:
             "captions": [drop_random(example["captions"]) for example in examples]
         }
         for key in examples[0]:
-            if key != "latents" and key != "captions":
+            if key != "latent" and key != "captions":
                 return_dict[key] = [example[key] for example in examples]
         return return_dict
 
