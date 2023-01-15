@@ -529,7 +529,7 @@ class StableDiffusionTrainer:
                 latent_sizes[l.size()] = (idx, latent_sizes[l.size()][1] + 1)
             else:
                 latent_sizes[l.size()] = (idx, 1)
-        largest_latent = max(list(latent_sizes.items()), key=lambda x:x[1][0])[1][0]
+        largest_latent = max(list(latent_sizes.items()), key=lambda x:x[1][1])[1][0]
 
         for idx, l in enumerate(latents):
             if l.size() != latents[largest_latent].size():
