@@ -39,6 +39,7 @@
         "unet",
         "vmem",
         "Waifu",
+        "wallhaven",
         "wandb",
         "xformers"
     ]
