@@ -130,6 +130,12 @@ parser.add_argument(
     help="Number of steps to save checkpoints at.",
 )
 parser.add_argument(
+    "--resume_steps",
+    type=int,
+    default=-1,
+    help="Step at which to resume.",
+)
+parser.add_argument(
     "--shuffle",
     dest="shuffle",
     type=bool_t,
@@ -628,6 +634,11 @@ class StableDiffusionTrainer:
                 self.text_encoder.train()
             for _, batch in enumerate(self.train_dataloader):
                 step_start = time.perf_counter()
+                if self.global_step < args.resume_steps:
+                    if self.accelerator.is_main_process:
+                        self.progress_bar.update(1)
+                    self.global_step += 1
+                    continue
 
                 logs = self.step(batch, epoch)
 
@@ -838,6 +849,8 @@ def main() -> None:
         print(f"Total of {len(sampler)} batches found.")
         args.batch_size = bucket.batch_size
         print(f"BATCH SIZE: {args.batch_size}")
+        if args.resume_steps > 0:
+            print(f"RESUME: {args.resume_steps}")
 
     # prefetch_factor is 2 by default ->
     # 2 * num_workers batches will prefetch
