@@ -638,6 +638,7 @@ class StableDiffusionTrainer:
                     if self.accelerator.is_main_process:
                         self.progress_bar.update(1)
                     self.global_step += 1
+                    self.lr_scheduler.step()
                     continue
 
                 logs = self.step(batch, epoch)
