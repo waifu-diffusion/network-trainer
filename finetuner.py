@@ -19,6 +19,7 @@ import pickle
 import itertools
 import copy
 import numpy as np
+import io
 from connector.store import AspectBucket, AspectDataset, AspectBucketSampler
 
 try:
@@ -426,6 +427,8 @@ class StableDiffusionTrainer:
         pipeline.save_pretrained(os.path.join(args.output_path, 'step_' + str(self.global_step)), safe_serialization=True)
         if args.use_ema:
             self.ema.restore(unet.parameters())
+        del pipeline
+        gc.collect()
 
     def sample(self, prompt: str) -> None:
         # get prompt from random batch
@@ -526,7 +529,7 @@ class StableDiffusionTrainer:
 
     def sub_step(self, batch: dict, epoch: int) -> torch.Tensor:
         # Load our network-streamed latents
-        latents = list(map(lambda x: torch.load(x), batch["latents"]))
+        latents = list(map(lambda x: torch.load(io.BytesIO(x)), batch["latents"]))
         # Make sure we have latents of all the same size
         # (this should be true unless there is a db or preprocessing error)
         latent_sizes = {}
@@ -612,6 +615,7 @@ class StableDiffusionTrainer:
             "rank/loss": loss.detach().item()
         }, step=self.global_step)
 
+        del latents
         return self.accelerator.gather_for_metrics(loss).mean()
 
     def step(self, batch: dict, epoch: int) -> dict:
@@ -639,6 +643,9 @@ class StableDiffusionTrainer:
                         self.progress_bar.update(1)
                     self.global_step += 1
                     self.lr_scheduler.step()
+                    del batch["captions"]
+                    del batch["latents"]
+                    del batch
                     continue
 
                 logs = self.step(batch, epoch)
@@ -696,6 +703,10 @@ class StableDiffusionTrainer:
                     if self.global_step % args.image_log_steps == 0:
                         prompt = batch["captions"][random.randint(0, len(batch["captions"]) - 1)]
                         self.sample(prompt)
+
+                del batch["captions"]
+                del batch["latents"]
+                del batch
 
         self.accelerator.wait_for_everyone()
         self.save_checkpoint()
@@ -831,12 +842,12 @@ def main() -> None:
 
     def collate_fn(examples):
         return_dict = {
-            "latents": [example["latent"] for example in examples],
-            "captions": [drop_random(example["captions"]) for example in examples]
+            "latents": [example[0] for example in examples],
+            "captions": [drop_random(example[1]) for example in examples],
+            "source_name": [example[2] for example in examples],
+            "source_id": [example[3] for example in examples]
         }
-        for key in examples[0]:
-            if key != "latent" and key != "captions":
-                return_dict[key] = [example[key] for example in examples]
+
         return return_dict
 
     with open(args.dataset, 'rb') as f:
@@ -858,7 +869,7 @@ def main() -> None:
     train_dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_sampler=sampler,
-        num_workers=10,
+        num_workers=40,
         collate_fn=collate_fn
     )
 
@@ -924,7 +935,6 @@ def main() -> None:
     if accelerator.is_main_process:
         print(get_gpu_ram())
         print("Done!")
-
 
 if __name__ == "__main__":
     main()
