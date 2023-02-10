@@ -869,7 +869,7 @@ def main() -> None:
     train_dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_sampler=sampler,
-        num_workers=40,
+        num_workers=30,
         collate_fn=collate_fn
     )
 
