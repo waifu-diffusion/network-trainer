@@ -192,6 +192,18 @@ parser.add_argument(
     ),
 )
 parser.add_argument(
+    "--scale_lr",
+    action="store_true",
+    default=False,
+    help="Scale the learning rate by the number of GPUs, gradient accumulation steps, and batch size.",
+)
+parser.add_argument(
+    "--gradient_accumulation_steps",
+    type=int,
+    default=1,
+    help="Number of updates steps to accumulate before performing a backward/update pass.",
+)
+parser.add_argument(
     "--lr_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
 )
 parser.add_argument(
@@ -711,6 +723,7 @@ class StableDiffusionTrainer:
         self.accelerator.wait_for_everyone()
         self.save_checkpoint()
 
+
 def get_cosine_with_hard_restarts_schedule_with_warmup_and_scaling(
     optimizer: Optimizer,
     num_warmup_steps: int,
@@ -730,6 +743,7 @@ def get_cosine_with_hard_restarts_schedule_with_warmup_and_scaling(
 
     return LambdaLR(optimizer, lr_lambda, last_epoch)
 
+
 def main() -> None:
     if args.hf_token is None:
         try:
@@ -746,7 +760,7 @@ def main() -> None:
 
     # get device
     accelerator = accelerate.Accelerator(
-        gradient_accumulation_steps=1,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         mixed_precision="fp16" if args.fp16 else "no",
         even_batches=False
     )
@@ -796,6 +810,11 @@ def main() -> None:
         unet.enable_gradient_checkpointing()
         if args.train_text_encoder:
             text_encoder.gradient_checkpointing_enable()
+
+    if args.scale_lr:
+        args.learning_rate = (
+            args.learning_rate * args.gradient_accumulation_steps * args.train_batch_size * accelerator.num_processes
+        )
 
     if args.use_xformers:
         unet.set_use_memory_efficient_attention_xformers(True)
@@ -873,11 +892,18 @@ def main() -> None:
         collate_fn=collate_fn
     )
 
+    # Scheduler and math around the number of training steps.
+    overrode_max_train_steps = False
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    if args.max_train_steps is None:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+        overrode_max_train_steps = True
+
     if args.lr_scheduler == 'cosine_with_restarts':
         lr_scheduler = get_cosine_with_hard_restarts_schedule_with_warmup_and_scaling(
             optimizer=optimizer,
-            num_warmup_steps=args.lr_warmup_steps,
-            num_training_steps=args.epochs * len(train_dataloader),
+            num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
+            num_training_steps=args.epochs * len(train_dataloader) * args.gradient_accumulation_steps,
             num_cycles=args.lr_num_cycles,
             max_scale=args.lr_max_scale,
             min_scale=args.lr_min_scale
@@ -886,8 +912,8 @@ def main() -> None:
         lr_scheduler = get_scheduler(
             args.lr_scheduler,
             optimizer=optimizer,
-            num_warmup_steps=args.lr_warmup_steps,
-            num_training_steps=args.epochs * len(train_dataloader)
+            num_warmup_steps=args.lr_warmup_steps * args.gradient_accumulation_steps,
+            num_training_steps=args.epochs * len(train_dataloader) * args.gradient_accumulation_steps
         )
 
     if not args.train_text_encoder:
@@ -909,6 +935,13 @@ def main() -> None:
         )
     else:
          text_encoder = text_encoder.to(accelerator.device)
+
+    # We need to recalculate our total training steps as the size of the training dataloader may have changed.
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    if overrode_max_train_steps:
+        args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
+    # Afterwards we recalculate our number of training epochs
+    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     # create ema
     if args.use_ema:
