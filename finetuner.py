@@ -210,6 +210,7 @@ parser.add_argument('--clip_penultimate', action="store_true", default=False, he
 parser.add_argument(
     "--caption_log_steps", type=int, default=0, help="Number of steps to log captions, 0 disables"
 )
+parser.add_argument("--text_encoder_learning_rate", type=float, default=7e-9, help="Learning rate for the text encoder")
 args = parser.parse_args()
 
 
@@ -814,7 +815,10 @@ def main() -> None:
         optimizer_cls = torch.optim.AdamW
 
     optimizer = optimizer_cls(
-        unet.parameters() if not args.train_text_encoder else itertools.chain(unet.parameters(), text_encoder.parameters()),
+        unet.parameters() if not args.train_text_encoder else [
+            {"params": unet.parameters()},
+            {"params": text_encoder.parameters(), "lr": args.text_encoder_learning_rate}
+        ],
         lr=args.lr,
         betas=(args.adam_beta1, args.adam_beta2),
         eps=args.adam_epsilon,
