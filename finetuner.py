@@ -602,12 +602,12 @@ class StableDiffusionTrainer:
         # Backprop
         self.accelerator.backward(loss)
         if self.accelerator.sync_gradients:
-            params_to_clip = (
-                itertools.chain(self.unet.parameters(), self.text_encoder.parameters())
-                if args.train_text_encoder
-                else self.unet.parameters()
-            )
-            self.accelerator.clip_grad_norm_(params_to_clip, 1.0)
+            if args.train_text_encoder:
+                # 1 / sqrt(2) because we are clipping two different gradients
+                self.accelerator.clip_grad_norm_(self.text_encoder.parameters(), 2 ** -0.5)
+                self.accelerator.clip_grad_norm_(self.unet.parameters(), 2 ** -0.5)
+            else:
+                self.accelerator.clip_grad_norm_(self.unet.parameters(), 1.0)
         self.optimizer.step()
         self.lr_scheduler.step()
         self.optimizer.zero_grad()
